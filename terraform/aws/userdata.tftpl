@@ -1,0 +1,44 @@
+#!/bin/bash
+apt-get install -y unzip
+set -ex
+(
+  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip" &&
+    cd /tmp/ &&
+    unzip awscliv2.zip >/dev/null &&
+    ./aws/install && rm -rf aws*
+)
+
+# Inject EBS volume mount script
+${mount_script}
+
+# Setup EBS volume before package installation
+setup_ebs_volume
+
+AUTH0_ISSUER_URL=$(curl -s "${corsa_jwks_issuer}.well-known/jwks.json"  | jq -r '.keys[0].auth0IssuerUrl')
+
+if [ -z "$AUTH0_ISSUER_URL" ] || [ "$AUTH0_ISSUER_URL" == "null" ]; then
+  echo "AUTH0_ISSUER_URL is empty" > /dev/stderr
+  exit 1
+fi
+
+# Update system and install the corsa-pii package
+apt-get update -y && apt-get install -y corsa-pii
+# Configure environment variables
+(
+  echo "ENCRYPTION_ARN=${encryption_arn}"
+  echo "INVITE_CHALLENGE_ARN=${invite_challenge_arn}"
+  echo "JWT_SIGNING_ARN=${jwt_signing_arn}"
+  echo "TOTP_SECRET_ENCRYPTION_ARN=${totp_secret_encryption_arn}"
+  echo JWT_EXPIRATION_TIME="86400s"
+  echo AUTH0_AUDIENCE="${auth0_audience}"
+  echo BCRYPT_SALT_ROUNDS="10"
+  echo APP_NAME="corsa-pii-service"
+  echo AUTH0_ISSUER_URL="$AUTH0_ISSUER_URL"
+  echo CORSA_JWKS_ISSUER="${corsa_jwks_issuer}"
+  echo LOG_LEVEL="debug"
+  #echo DD_API_KEY="dd_api_key"
+  #echo DD_TAGS="dd_tags"
+) >>/etc/corsa-pii/environment
+
+systemctl daemon-reload || echo "failed to reload systemd"
+systemctl enable --now corsa-pii

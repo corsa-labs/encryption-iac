@@ -1,0 +1,70 @@
+#!/bin/bash
+# EBS Volume Mount and Format Script
+# This script detects an attached EBS volume and mounts it
+
+setup_ebs_volume() {
+  local volume_id=$(echo ${ebs_volume_id} | sed 's/-//g')
+  local mount_point="/var/lib/corsa-pii"
+  local device=""
+
+  echo "Setting up EBS volume with ID: $volume_id for $mount_point"
+
+  # Wait for device to become available and find it by volume ID
+  echo "Looking for EBS volume device..."
+  local max_device_attempts=30
+  local device_attempt=0
+  while [ $device_attempt -lt $max_device_attempts ]; do
+    device_attempt=$((device_attempt + 1))
+    # Use lsblk to find the device by serial number (which matches volume ID)
+    # Remove 'vol-' prefix from volume ID for serial number matching
+    local serial_number="$${volume_id#vol-}"
+    # Find device using lsblk JSON output
+    device=$(lsblk --json --fs --output NAME,SERIAL | jq -r ".blockdevices[]? | select(.serial == \"$serial_number\") | .name" 2>/dev/null || echo "")
+    if [ -n "$device" ] && [ "$device" != "null" ]; then
+      device="/dev/$device"
+      echo "Found EBS volume device: $device (serial: $serial_number)"
+      break
+    fi
+
+    echo "Device attempt $device_attempt/$max_device_attempts: Volume $volume_id not found yet, waiting 5 seconds..."
+    sleep 5
+  done
+
+  if [ $device_attempt -ge $max_device_attempts ]; then
+    echo "ERROR: EBS volume device not found within 5 minutes"
+    lsblk --json --fs
+    exit 1
+  fi
+
+  echo "Using device: $device for volume: $volume_id"
+
+  # Verify the device exists as a block device
+  if [ ! -b "$device" ]; then
+    echo "ERROR: $device is not a valid block device"
+    exit 1
+  fi
+
+  # Create mount point
+  mkdir -p "$mount_point"
+
+  # Check if device is already formatted
+  if blkid "$device" >/dev/null 2>&1; then
+    echo "Device $device is already formatted"
+    mount "$device" "$mount_point"
+  else
+    echo "Device $device is not formatted, formatting now"
+    mkfs.ext4 "$device"
+    mount "$device" "$mount_point"
+  fi
+
+  # Add to fstab using UUID for reliability
+  local uuid=$(blkid -s UUID -o value "$device")
+  if [ -n "$uuid" ]; then
+    echo "UUID=$uuid $mount_point ext4 defaults,nofail 0 2" >>/etc/fstab
+    echo "Successfully mounted $device (UUID: $uuid) at $mount_point"
+  else
+    echo "WARNING: Could not get UUID for $device, using device name in fstab"
+    echo "$device $mount_point ext4 defaults,nofail 0 2" >>/etc/fstab
+    echo "Successfully mounted $device at $mount_point"
+  fi
+}
